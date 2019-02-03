@@ -27,6 +27,8 @@ type Client struct {
 	Timeout      time.Duration
 }
 
+const fileSendCommand = "/usr/bin/scp -qt %s"
+
 // Connects to the remote SSH server, returns error if it couldn't establish a session to the SSH server
 func (a *Client) Connect() error {
 	client, err := ssh.Dial("tcp", a.Host, a.ClientConfig)
@@ -55,6 +57,16 @@ func (a *Client) CopyFile(fileReader io.Reader, remotePath string, permissions s
 	bytes_reader := bytes.NewReader(contents_bytes)
 
 	return a.Copy(bytes_reader, remotePath, permissions, int64(len(contents_bytes)))
+}
+
+// Copies the contents of an io.Reader to a remote location, the length is determined by reading the io.Reader until EOF
+// if the file length in know in advance please use "SudoCopy" instead. This copy upgrades permissions to a given
+// user with sudo
+func (a *Client) SudoCopyFile(fileReader io.Reader, remotePath string, permissions string, user string) error {
+	contents_bytes, _ := ioutil.ReadAll(fileReader)
+	bytes_reader := bytes.NewReader(contents_bytes)
+
+	return a.SudoCopy(bytes_reader, remotePath, permissions, int64(len(contents_bytes)), user)
 }
 
 // waitTimeout waits for the waitgroup for the specified max timeout.
@@ -136,8 +148,18 @@ func (a *Client) CopyFromRemote(remotePath string) (io.Reader, os.FileMode, erro
 	return <-readerCh, c.Permissions, nil
 }
 
-// Copies the contents of an io.Reader to a remote location
+// Copy the contents of an io.Reader to a remote location
 func (a *Client) Copy(r io.Reader, remotePath string, permissions string, size int64) error {
+	return a.copy(r, remotePath, permissions, size, "")
+}
+
+// SudoCopy transfers the file with permissions granted after "sudo"
+func (a *Client) SudoCopy(r io.Reader, remotePath string, permissions string, size int64, user string) error {
+	return a.copy(r, remotePath, permissions, size, fmt.Sprintf("/usr/bin/sudo -u %s", user))
+}
+
+// Copies the contents of an io.Reader to a remote location
+func (a *Client) copy(r io.Reader, remotePath string, permissions string, size int64, cmd string) error {
 	filename := path.Base(remotePath)
 	directory := path.Dir(remotePath)
 	errCh := make(chan error, 2)
@@ -155,7 +177,8 @@ func (a *Client) Copy(r io.Reader, remotePath string, permissions string, size i
 	syncFile := func(wg *sync.WaitGroup) {
 		defer wg.Done()
 
-		err := a.Session.Run("/usr/bin/scp -qt " + directory)
+		cmd := fmt.Sprintf("\n%s %s\n", cmd, fmt.Sprintf(fileSendCommand, directory))
+		err := a.Session.Run(cmd)
 		if err != nil {
 			errCh <- err
 			return
